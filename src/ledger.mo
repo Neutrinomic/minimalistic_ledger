@@ -54,14 +54,12 @@ actor {
             case (#burn) {
                 let bal = get_balance(from_bacc);
                 if (bal < req.amount + FEE) return #Err(#InsufficientFunds({balance = bal}));
-                let dedupId = U.dedup(from_bacc, req);
                 put_balance(from_bacc, bal - req.amount - FEE);
                 #burn({req with from; spender=null});
             };
             case (#mint) {
                 let to_bal = get_balance(to_bacc);
                 put_balance(to_bacc, to_bal - req.amount);
-                let dedupId = U.dedup(from_bacc, req);
                 #mint(req);
             };
         };
