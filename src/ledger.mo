@@ -37,8 +37,8 @@ actor {
         ignore do ? { if (req.created_at_time! + TX_WINDOW + PERMITTED_DRIFT < U.now()) return #Err(#TooOld)};  
         ignore do ? { if (req.fee! != FEE) return #Err(#BadFee({expected_fee = FEE}))};
 
-        let ?from_bacc = U.accountToBlob({owner=caller; subaccount=req.from_subaccount}) else return #Err(#GenericError({message = "Invalid From Subaccount"; error_code = 1}));
-        let ?to_bacc = U.accountToBlob(req.to) else return #Err(#GenericError({message = "Invalid To Subaccount"; error_code = 1}));
+        let ?from_bacc = U.accountToBlob(from) else return #Err(#GenericError({message = "Invalid From Subaccount"; error_code = 1111}));
+        let ?to_bacc = U.accountToBlob(req.to) else return #Err(#GenericError({message = "Invalid To Subaccount"; error_code = 1112}));
         let dedupId = U.dedup(from_bacc, req);
         ignore do ? { return #Err(#Duplicate({duplicate_of=Map.get(dedup, Map.bhash, dedupId!)!})); };
 
