@@ -55,7 +55,6 @@ actor {
                 let bal = get_balance(from_bacc);
                 if (bal < req.amount + FEE) return #Err(#InsufficientFunds({balance = bal}));
                 let dedupId = U.dedup(from_bacc, req);
-                ignore do ? { return #Err(#Duplicate({duplicate_of=Map.get(dedup, Map.bhash, dedupId!)!})); };
                 put_balance(from_bacc, bal - req.amount - FEE);
                 #burn({req with from; spender=null});
             };
@@ -63,7 +62,6 @@ actor {
                 let to_bal = get_balance(to_bacc);
                 put_balance(to_bacc, to_bal - req.amount);
                 let dedupId = U.dedup(from_bacc, req);
-                ignore do ? { return #Err(#Duplicate({duplicate_of=Map.get(dedup, Map.bhash, dedupId!)!})); };
                 #mint(req);
             };
         };
