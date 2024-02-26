@@ -49,7 +49,7 @@ actor {
         encodeBlock = func(b) = ("myschemaid", to_candid (b));
         addPhash = func(a, phash) = {a with phash};
         hashBlock = func(b) = Sha256.fromBlob(#sha224, b.1);
-        reducers = [dedup.reducer];
+        reducers = [dedup.reducer, balances.reducer];
     });
 
     // --
