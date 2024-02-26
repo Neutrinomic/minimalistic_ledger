@@ -1,86 +1,114 @@
 import Map "mo:map/Map";
 import Principal "mo:base/Principal";
-import T "./icrc";
+import ICRC "./icrc";
 import U "./utils";
 import Array "mo:base/Array";
 import Blob "mo:base/Blob";
-import SWB "mo:swb";
+import SWB "mo:swb/Stable";
+import Debug "mo:base/Debug";
+import Nat "mo:base/Nat";
+import Chain "mo:rechain";
+import Deduplication "./reducers/deduplication";
+import T "./types";
+import Balances "reducers/balances";
+import Sha256 "mo:sha2/Sha256";
 
 actor {
 
-    let FEE = 1_0000;
-  
-    let TX_WINDOW : Nat64 = 86400_000_000_000;  // 24 hours in nanoseconds
-    let PERMITTED_DRIFT : Nat64 = 60_000_000_000;
+    // -- Ledger configuration
+    let config : T.Config = {
+        var TX_WINDOW  = 86400_000_000_000;  // 24 hours in nanoseconds
+        var PERMITTED_DRIFT = 60_000_000_000;
+        var FEE = 1_000;
+        var MINTING_ACCOUNT = {
+            owner = Principal.fromText("aaaaa-aa");
+            subaccount = null;
+            }
+    };
 
-    let minting_account : T.Account = {owner= Principal.fromText("aaaaa-aa"); subaccount=null};
+    // -- Reducer : Balances
+    stable let balances_mem = Balances.Mem();
+    let balances = Balances.Balances({
+        config;
+        mem = balances_mem;
+    });
 
-    stable let accounts = Map.new<Blob, Nat>();
-    stable let dedup = Map.new<Blob, Nat>();
+    // -- Reducer : Deduplication
 
-    let buf = SWB.SlidingWindowBuffer<T.StoredBlock>();
+    stable let dedup_mem = Deduplication.Mem();
+    let dedup = Deduplication.Deduplication({
+        config;
+        mem = dedup_mem;
+    });
 
-    public shared({caller}) func icrc1_transfer(req: T.TransferArg) : async T.Result {
+    // -- Chain
+    let chain_mem = Chain.Mem();
+
+    let chain = Chain.Chain<T.Action, T.ActionError, T.ActionWithPhash>({
+        mem = chain_mem;
+        encodeBlock = func(b) = ("myschemaid", to_candid (b));
+        addPhash = func(a, phash) = {a with phash};
+        hashBlock = func(b) = Sha256.fromBlob(#sha224, b.1);
+        reducers = [dedup.reducer];
+    });
+
+    // --
+
+    // ICRC-1
+    public shared ({ caller }) func icrc1_transfer(req : ICRC.TransferArg) : async ICRC.Result {
         transfer(caller, req);
     };
 
-    public shared({caller}) func batch_transfer(req: [T.TransferArg]) : async [T.Result] {
-        Array.map<T.TransferArg, T.Result>(req, func (r) = transfer(caller, r));
+    public query func icrc1_balance_of(acc: ICRC.Account) : async Nat {
+        balances.get(acc)
     };
 
-    private func transfer(caller: Principal, req: T.TransferArg) : T.Result {
+    // Oversimplified ICRC-4
+    public shared({caller}) func batch_transfer(req: [ICRC.TransferArg]) : async [ICRC.Result] {
+        Array.map<ICRC.TransferArg, ICRC.Result>(req, func (r) = transfer(caller, r));
+    };
 
-        let from : T.Account = {owner=caller; subaccount=req.from_subaccount};
-        let tx_kind = if (from == minting_account) { #mint } else if (req.to == minting_account) { #burn } else { #transfer };
+    // Alternative to ICRC-3 
+    public query func get_transactions(req: Chain.GetBlocksRequest) : async Chain.GetTransactionsResponse {
+        chain.get_transactions(req);
+    };
 
-        ignore do ? { if (U.now() < req.created_at_time!) return #Err(#CreatedInFuture({ledger_time = U.now()}))};
-        ignore do ? { if (req.created_at_time! + TX_WINDOW + PERMITTED_DRIFT < U.now()) return #Err(#TooOld)};  
-        ignore do ? { if (req.fee! != FEE) return #Err(#BadFee({expected_fee = FEE}))};
-
-        let ?from_bacc = U.accountToBlob(from) else return #Err(#GenericError({message = "Invalid From Subaccount"; error_code = 1111}));
-        let ?to_bacc = U.accountToBlob(req.to) else return #Err(#GenericError({message = "Invalid To Subaccount"; error_code = 1112}));
-        let dedupId = U.dedup(from_bacc, req);
-        ignore do ? { return #Err(#Duplicate({duplicate_of=Map.get(dedup, Map.bhash, dedupId!)!})); };
-
-        let kind : T.StoredKind = switch(tx_kind) {
-            case (#transfer) {
-                let bal = get_balance(from_bacc);
-                let to_bal = get_balance(to_bacc);
-                if (bal < req.amount + FEE) return #Err(#InsufficientFunds({balance = bal}));
-                put_balance(from_bacc, bal - req.amount - FEE);
-                put_balance(to_bacc, to_bal + req.amount);
-                #transfer({req with from; spender=null});
-            };
-            case (#burn) {
-                let bal = get_balance(from_bacc);
-                if (bal < req.amount + FEE) return #Err(#InsufficientFunds({balance = bal}));
-                put_balance(from_bacc, bal - req.amount - FEE);
-                #burn({req with from; spender=null});
-            };
-            case (#mint) {
-                let to_bal = get_balance(to_bacc);
-                put_balance(to_bacc, to_bal - req.amount);
-                #mint(req);
-            };
+    // --
+  
+    private func transfer(caller:Principal, req:ICRC.TransferArg) : ICRC.Result {
+        let from : ICRC.Account = {
+            owner = caller;
+            subaccount = req.from_subaccount;
         };
 
-        let blockId = buf.add({kind; timestamp = U.now()}: T.StoredBlock);
-        ignore do ? { Map.put(dedup, Map.bhash, dedupId!, blockId); };
-        #Ok(blockId);
+        let payload : T.Payload = if (from == config.MINTING_ACCOUNT) {
+            #mint({
+                to = req.to;
+                amount = req.amount;
+            });
+        } else if (req.to == config.MINTING_ACCOUNT) {
+            #burn({
+                from = from;
+                amount = req.amount;
+            });
+        } else {
+            #transfer({
+                to = req.to;
+                fee = req.fee;
+                from = from;
+                amount = req.amount;
+            });
+        };
 
+        let action = {
+            caller;
+            created_at_time = req.created_at_time;
+            memo = req.memo;
+            timestamp = U.now();
+            payload;
+        };
+
+        chain.dispatch(action);
     };
 
-    private func get_balance(bacc: Blob) : Nat {
-        let ?bal = Map.get(accounts, Map.bhash, bacc) else return 0;
-        bal;
-    };
-
-    private func put_balance(bacc : Blob, bal : Nat) : () {
-      ignore Map.put<Blob, Nat>(accounts, Map.bhash, bacc, bal);
-    };
-
-    public query func icrc1_balance_of(acc: T.Account) : async Nat {
-        let ?bacc = U.accountToBlob(acc) else return 0;
-        get_balance(bacc)
-    };
-}
+};
